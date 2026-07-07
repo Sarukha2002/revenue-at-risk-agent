@@ -20,7 +20,7 @@ of which at-risk accounts represent the most revenue exposure, right now.
 
 ## 2. Goals
 
-- Convert unstructured CS signal (Slack messages, spreadsheet rows) into structured,
+- Convert unstructured Customer Support signal (Slack messages, spreadsheet rows) into structured,
   scored risk records without manual re-entry
 - Surface a single dashboard ranked by `revenue_at_risk` (ARR × churn risk), not by ticket
   age or squeaky-wheel escalation volume
