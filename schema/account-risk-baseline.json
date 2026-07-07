@@ -1,0 +1,153 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AccountRiskBaseline",
+  "description": "The invisible contract between the AI agent, the database, and the UI. Every field Claude outputs must match this schema exactly — this is what n8n maps to Google Sheets columns and what Lovable reads for the dashboard.",
+  "type": "object",
+  "required": [
+    "account_name",
+    "arr",
+    "renewal_horizon_days",
+    "financial_risk_score",
+    "revenue_at_risk",
+    "technical_domain",
+    "sentiment",
+    "bug_summary",
+    "recommended_action",
+    "escalation_flag"
+  ],
+  "properties": {
+    "account_name": {
+      "type": "string",
+      "description": "Canonical enterprise client name. Normalize: 'ACME Corp', 'acme', 'Acme (ENT)' → 'Acme Corp'"
+    },
+    "arr": {
+      "type": "number",
+      "description": "Annual Recurring Revenue in USD as integer. Normalize: '$500K' → 500000, '$1.2M' → 1200000"
+    },
+    "renewal_horizon_days": {
+      "type": "integer",
+      "description": "Days from today until contract renewal. Used in financial_risk_score formula."
+    },
+    "financial_risk_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Computed using formula: ((180 - renewal_horizon_days) / 180) * 100. If renewal_horizon_days > 180, use 0.2 as multiplier (score = 20). Round to 1 decimal place. Higher = more urgent."
+    },
+    "revenue_at_risk": {
+      "type": "number",
+      "description": "Computed: arr * (financial_risk_score / 100). Dollar amount at risk of churn. Round to nearest dollar."
+    },
+    "technical_domain": {
+      "type": "string",
+      "enum": [
+        "Frontend",
+        "API",
+        "Data Pipeline",
+        "Authentication",
+        "Database",
+        "Infrastructure",
+        "Integrations",
+        "Mobile",
+        "Unknown"
+      ],
+      "description": "Categorize based on symptoms. Rules: page load/UI/rendering issues → Frontend. Timeout/rate limit/endpoint errors → API. Broken charts/missing data/sync lag → Data Pipeline. Login/SSO/permissions → Authentication. Slow queries/data corruption → Database. Downtime/latency/scaling → Infrastructure. Third-party connectors/webhooks → Integrations."
+    },
+    "bug_severity": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2", "P3"],
+      "description": "P0: complete outage/blocker, P1: major feature broken, P2: degraded but workaround exists, P3: minor/cosmetic. Infer from language: 'can't log in', 'all users blocked' → P0. 'slow', 'sometimes fails' → P2."
+    },
+    "days_issue_open": {
+      "type": "integer",
+      "description": "Number of days the issue has been reported. Extract from text: 'for 3 weeks' → 21, 'since last Tuesday' → calculate from context."
+    },
+    "sentiment": {
+      "type": "string",
+      "enum": ["Critical", "Frustrated", "Concerned", "Neutral", "Satisfied"],
+      "description": "Overall account sentiment based on CS language. 'FURIOUS', 'threatening to leave', 'escalating to CEO' → Critical. 'Really unhappy', 'disappointed' → Frustrated. 'Worried', 'asking for updates' → Concerned."
+    },
+    "escalation_flag": {
+      "type": "boolean",
+      "description": "true if executive involvement, legal/SLA threats, or explicit churn threat is mentioned."
+    },
+    "bug_summary": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One clear sentence describing the technical issue. Written for an engineering audience. Include: what is broken, how long, and user impact."
+    },
+    "cs_owner": {
+      "type": "string",
+      "description": "Name of the Customer Success Manager. Extract from message sender or body. null if not mentioned."
+    },
+    "recommended_action": {
+      "type": "string",
+      "maxLength": 250,
+      "description": "One actionable sentence for leadership. Must name a specific owner (Engineering, CS, VP level) and a timeframe."
+    },
+    "engineering_ticket_ref": {
+      "type": "string",
+      "description": "Jira/Linear ticket ID if mentioned in the message (e.g. 'ENG-4421'). null if not mentioned."
+    },
+    "source_channel": {
+      "type": "string",
+      "description": "Origin of this record: 'slack', 'google_sheets', 'manual_form', 'jira'"
+    },
+    "raw_feedback": {
+      "type": "string",
+      "description": "The original unprocessed CS message — stored for audit trail. Never displayed in dashboard."
+    },
+    "last_updated": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when this record was last processed by the AI pipeline."
+    }
+  },
+
+  "examples": [
+    {
+      "account_name": "Acme Corp",
+      "arr": 500000,
+      "renewal_horizon_days": 77,
+      "financial_risk_score": 57.2,
+      "revenue_at_risk": 286000,
+      "technical_domain": "Authentication",
+      "bug_severity": "P0",
+      "days_issue_open": 23,
+      "sentiment": "Critical",
+      "escalation_flag": true,
+      "bug_summary": "SSO integration broken for 23 days since v2.4 deploy — entire Acme team locked out of platform.",
+      "cs_owner": "Sarah Chen",
+      "recommended_action": "Assign dedicated engineer to ENG-4421 by EOD today with daily CS status update — escalate to VP Engineering if not resolved in 48h.",
+      "engineering_ticket_ref": "ENG-4421",
+      "source_channel": "slack",
+      "raw_feedback": "Just got off the phone with Acme — they are FURIOUS. SSO has been broken for 3 weeks now...",
+      "last_updated": "2026-06-30T08:00:00Z"
+    },
+    {
+      "account_name": "Globex Inc",
+      "arr": 320000,
+      "renewal_horizon_days": 210,
+      "financial_risk_score": 20.0,
+      "revenue_at_risk": 64000,
+      "technical_domain": "Data Pipeline",
+      "bug_severity": "P1",
+      "days_issue_open": 9,
+      "sentiment": "Frustrated",
+      "escalation_flag": false,
+      "bug_summary": "Revenue analytics dashboard showing stale data for 9 days — charts not refreshing, client reporting on incorrect numbers.",
+      "cs_owner": "Mike Torres",
+      "recommended_action": "Data eng team to audit pipeline refresh job this week and communicate ETA to Globex by Thursday.",
+      "engineering_ticket_ref": null,
+      "source_channel": "google_sheets",
+      "raw_feedback": "Globex really unhappy with broken charts, been 9 days now",
+      "last_updated": "2026-06-30T08:00:00Z"
+    }
+  ],
+
+  "_pm_notes": {
+    "why_this_schema_matters": "This is not just a data model. It is the contract that makes the entire system work. If Claude outputs a field name that doesn't match what n8n maps, or what Lovable expects, the pipeline silently breaks. Define this once, enforce it everywhere.",
+    "financial_risk_score_formula": "((180 - renewal_horizon_days) / 180) * 100. Cap at 100. Floor at 20 (for renewals > 180 days out). This formula weights time-to-renewal as the dominant risk signal — a $100K account renewing in 14 days is more urgent than a $500K account renewing in 300 days.",
+    "what_to_add_in_v2": "Add churn_probability_ml (model-based score), competitor_mentioned (boolean), nps_last_score (integer), and open_ticket_count (integer) once you have more data sources."
+  }
+}

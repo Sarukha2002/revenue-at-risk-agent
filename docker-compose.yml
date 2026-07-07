@@ -1,0 +1,42 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Required for n8n's login cookie to work over plain http on localhost.
+      # Without this you get stuck in a login redirect loop.
+      # Kept false even with the ngrok tunnel live: the editor is still accessed via
+      # http://localhost:5678 day-to-day, and the tunnel's origin is independent of the
+      # localhost cookie session. Revisited on 2026-07-06 when the tunnel went up —
+      # decision: no change needed here. The editor UI is still gated by n8n's owner
+      # login regardless of this flag; that login is the real control, not the cookie's
+      # Secure attribute. Known trade-off going further than originally scoped: the raw
+      # tunnel exposes the whole n8n instance (including the editor login page), not just
+      # the webhook — accepted for this solo pilot on the condition the owner account has
+      # a strong password. Revisit if this ever moves beyond a single-operator pilot.
+      - N8N_SECURE_COOKIE=false
+      # Public URL n8n should use when generating webhook/callback URLs.
+      # Switched from ngrok to Cloudflare Quick Tunnel on 2026-07-06: ngrok's free "dev domain"
+      # (judgingly-evasion-tarot.ngrok-free.dev) was returning ERR_SSL_PROTOCOL_ERROR consistently
+      # across curl and browser clients, and dev domains can't be deleted/replaced on the free tier.
+      # Trade-off: Cloudflare's Quick Tunnel URL is ephemeral and changes on every restart (no free
+      # static option like ngrok offers) — acceptable for now since we're still testing, not live
+      # with a real frontend. Revisit before wiring up Lovable for real.
+      - WEBHOOK_URL=https://rings-desirable-followed-incentives.trycloudflare.com/
+      - N8N_HOST=rings-desirable-followed-incentives.trycloudflare.com
+      - N8N_PROTOCOL=https
+      # Change to your own timezone (IANA format) — affects schedule-trigger workflows like Workflow 3.
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      # Required for Workflow 3's Enrichment Agent to call its Jira HTTP Request Tool nodes.
+      # Without this, any node connected to an AI Agent via an "ai_tool" connection fails at
+      # runtime with 'has a "supplyData" method but no "execute" method' — even fully-configured,
+      # first-party @n8n/n8n-nodes-langchain tool nodes are gated by this flag, not just true
+      # community packages. Confirmed via a live test execution on 2026-07-06 before adding this.
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:

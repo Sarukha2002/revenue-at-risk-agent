@@ -1,0 +1,178 @@
+{
+  "name": "Revenue-at-Risk Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "revenue-at-risk",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "ec5c5903-8d05-489a-921f-ba8a4c835ffd",
+      "name": "Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Node 1: Receives POST from Lovable intake form. Body must include: account_name, arr, renewal_horizon_days, raw_feedback, source_channel. Auth credential must be HTTP Header Auth with Name=x-webhook-secret."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate required fields before hitting Claude\nconst body = $input.first().json.body || $input.first().json;\nconst required = ['account_name', 'arr', 'renewal_horizon_days', 'raw_feedback'];\nconst missing = required.filter(f => !body[f] && body[f] !== 0);\n\nif (missing.length > 0) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\n// Normalize arr — handle '$500K', '500,000', '0.5M' formats\nlet arr = body.arr;\nif (typeof arr === 'string') {\n  arr = arr.replace(/[$,]/g, '');\n  if (arr.toLowerCase().includes('k')) arr = parseFloat(arr) * 1000;\n  else if (arr.toLowerCase().includes('m')) arr = parseFloat(arr) * 1000000;\n  else arr = parseFloat(arr);\n}\n\n// Normalize days\nlet days = parseInt(body.renewal_horizon_days, 10);\nif (isNaN(days)) days = 180; // safe default\n\nreturn [{\n  json: {\n    account_name: String(body.account_name).trim(),\n    arr: Math.round(arr),\n    renewal_horizon_days: days,\n    raw_feedback: String(body.raw_feedback).trim(),\n    source_channel: body.source_channel || 'manual_form',\n    received_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "e0c33aba-bfaf-44c5-b3b8-bb7733a4680f",
+      "name": "Validate & Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 0],
+      "notes": "Pre-Claude validation. Normalizes ARR strings, validates required fields, prevents Claude from receiving malformed input."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"claude-sonnet-4-6\", max_tokens: 1024, temperature: 0, system: \"You are an elite Technical Product Manager and Data Architect embedded in a Customer Success intelligence pipeline. Your job is to analyze messy, unstructured complaints from Customer Success Managers and extract clean, highly structured data that engineering leadership can act on immediately.\\n\\nINSTRUCTIONS:\\n\\n1. Calculate financial_risk_score using this exact formula:\\n   financial_risk_score = ((180 - renewal_horizon_days) / 180) * 100\\n   - If renewal_horizon_days > 180: use 0.2 as the multiplier → score = 20.0\\n   - If renewal_horizon_days <= 0: score = 100.0\\n   - Round to 1 decimal place.\\n\\n2. Calculate revenue_at_risk = arr * (financial_risk_score / 100). Round to nearest dollar.\\n\\n3. Categorize technical_domain: page load/UI → Frontend. Timeout/API errors → API. Broken charts/missing data → Data Pipeline. Login/SSO → Authentication. Slow queries/corruption → Database. Downtime/latency → Infrastructure. Webhook/connector issues → Integrations. Unclear → Unknown.\\n\\n4. Infer bug_severity: complete outage/all users blocked → P0. Major feature broken → P1. Workaround exists → P2. Minor → P3.\\n\\n5. Assess sentiment: threats to leave/executive involved → Critical. Very unhappy → Frustrated. Worried → Concerned. Neutral update → Neutral. Happy → Satisfied.\\n\\n6. Set escalation_flag = true if: C-suite mentioned, legal/SLA threats, explicit churn threat, or 3+ escalations referenced.\\n\\nCall the extract_account_risk_signal tool exactly once with your analysis. Do not respond with text. If a field cannot be determined from the input, use null — never guess or hallucinate a ticket number, name, or owner.\", tools: [{ name: \"extract_account_risk_signal\", description: \"Extract structured churn-risk data from a raw CS signal about an enterprise account.\", input_schema: { type: \"object\", properties: { account_name: { type: \"string\" }, arr: { type: \"number\" }, renewal_horizon_days: { type: \"integer\" }, financial_risk_score: { type: \"number\", minimum: 0, maximum: 100 }, revenue_at_risk: { type: \"number\" }, technical_domain: { type: \"string\", enum: [\"Frontend\", \"API\", \"Data Pipeline\", \"Authentication\", \"Database\", \"Infrastructure\", \"Integrations\", \"Unknown\"] }, bug_severity: { type: [\"string\", \"null\"], enum: [\"P0\", \"P1\", \"P2\", \"P3\", null] }, days_issue_open: { type: [\"integer\", \"null\"] }, sentiment: { type: \"string\", enum: [\"Critical\", \"Frustrated\", \"Concerned\", \"Neutral\", \"Satisfied\"] }, escalation_flag: { type: \"boolean\" }, bug_summary: { type: \"string\", maxLength: 200 }, cs_owner: { type: [\"string\", \"null\"] }, recommended_action: { type: \"string\", maxLength: 250 }, engineering_ticket_ref: { type: [\"string\", \"null\"] }, source_channel: { type: \"string\", enum: [\"slack\", \"google_sheets\", \"manual_form\", \"jira\"] } }, required: [\"account_name\", \"arr\", \"renewal_horizon_days\", \"financial_risk_score\", \"revenue_at_risk\", \"technical_domain\", \"bug_severity\", \"days_issue_open\", \"sentiment\", \"escalation_flag\", \"bug_summary\", \"cs_owner\", \"recommended_action\", \"engineering_ticket_ref\", \"source_channel\"] } }], tool_choice: { type: \"tool\", name: \"extract_account_risk_signal\" }, messages: [{ role: \"user\", content: \"Account Name: \" + $json.account_name + \"\\nAnnual Contract Value (ARR): \" + $json.arr + \"\\nDays to Renewal: \" + $json.renewal_horizon_days + \"\\nSource: \" + $json.source_channel + \"\\n\\nRaw CS Feedback:\\n\" + $json.raw_feedback }] }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "4f03a201-f24a-417f-9b0b-76fe02557b20",
+      "name": "Claude — Extract & Score",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [448, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account" }
+      },
+      "notes": "Node 2: Calls Claude Sonnet with a forced tool_choice (native tool execution, not free-text JSON parsing — see prompts/claude-system-prompt-v2.md). Credential must be HTTP Header Auth with Name=x-api-key, Value=your Anthropic API key. Temperature 0 — deterministic extraction, not creative generation. jsonBody is built with JSON.stringify(), not hand-written template interpolation — raw_feedback is free text a human typed and could contain literal quote characters that would break a hand-written JSON string."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read Claude's tool_use block — no text parsing, no markdown-fence stripping.\nconst claudeResponse = $input.first().json;\nif (claudeResponse.stop_reason !== 'tool_use') {\n  throw new Error(`Expected stop_reason 'tool_use', got '${claudeResponse.stop_reason}'. Check tool_choice is set on the Claude node.`);\n}\n\nconst toolUseBlock = (claudeResponse.content || []).find(b => b.type === 'tool_use');\nif (!toolUseBlock) {\n  throw new Error('No tool_use block in Claude response — the model did not call extract_account_risk_signal.');\n}\n\nconst parsed = toolUseBlock.input;\n\n// Add system metadata\nparsed.last_updated = new Date().toISOString();\nparsed.pipeline_version = '2.0';\n\n// Enforce risk tier bucketing\nconst score = parsed.financial_risk_score || 0;\nif (score >= 80) parsed.risk_tier = 'Critical';\nelse if (score >= 60) parsed.risk_tier = 'High';\nelse if (score >= 40) parsed.risk_tier = 'Medium';\nelse parsed.risk_tier = 'Low';\n\n// Safety: cap revenue_at_risk to arr (can't be at risk of more than the contract)\nif (parsed.revenue_at_risk > parsed.arr) parsed.revenue_at_risk = parsed.arr;\n\nreturn [{ json: parsed }];"
+      },
+      "id": "d820d695-4ebc-4184-bc7e-9f9ca30a3f7d",
+      "name": "Parse & Validate Claude Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [672, 0],
+      "notes": "Reads the tool_use block's input directly — no free-text JSON parsing left in this pipeline. Adds risk_tier bucket, last_updated timestamp, caps revenue_at_risk to arr. Throws descriptive error if tool_choice wasn't honored or the tool wasn't called."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "RiskData",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_name": "={{ $json.account_name }}",
+            "arr": "={{ $json.arr }}",
+            "renewal_horizon_days": "={{ $json.renewal_horizon_days }}",
+            "financial_risk_score": "={{ $json.financial_risk_score }}",
+            "revenue_at_risk": "={{ $json.revenue_at_risk }}",
+            "risk_tier": "={{ $json.risk_tier }}",
+            "technical_domain": "={{ $json.technical_domain }}",
+            "bug_severity": "={{ $json.bug_severity }}",
+            "days_issue_open": "={{ $json.days_issue_open }}",
+            "sentiment": "={{ $json.sentiment }}",
+            "escalation_flag": "={{ $json.escalation_flag }}",
+            "bug_summary": "={{ $json.bug_summary }}",
+            "cs_owner": "={{ $json.cs_owner }}",
+            "recommended_action": "={{ $json.recommended_action }}",
+            "engineering_ticket_ref": "={{ $json.engineering_ticket_ref }}",
+            "source_channel": "={{ $json.source_channel }}",
+            "last_updated": "={{ $json.last_updated }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "5514465a-c1b8-4566-b664-a4634ee76e4d",
+      "name": "Write to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [880, 0],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Node 3: Appends a new row to the RiskData sheet. Sheet must have column headers matching the field names above (Row 1), plus a jira_ticket_key column (see n8n/workflow-ticket-enrichment.json). Replace REPLACE_WITH_YOUR_GOOGLE_SHEET_ID with your actual Sheet ID from the URL."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, account: $('Parse & Validate Claude Output').first().json.account_name, financial_risk_score: $('Parse & Validate Claude Output').first().json.financial_risk_score, revenue_at_risk: $('Parse & Validate Claude Output').first().json.revenue_at_risk, risk_tier: $('Parse & Validate Claude Output').first().json.risk_tier }) }}",
+        "options": {}
+      },
+      "id": "8c83d54b-e171-4d7b-ba27-c1437a33c0b0",
+      "name": "Respond to Lovable",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1104, 0],
+      "notes": "Returns success response to Lovable frontend so the UI can show the extracted risk score immediately after form submission. Runs in parallel with Call Account Rollup below — both fire from Write to Google Sheets's success output, so the rollup never adds latency to this response."
+    },
+    {
+      "id": "node-call-rollup",
+      "name": "Call Account Rollup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 208],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/rollup-account",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ account_name: $json.account_name }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Fires the Workflow 5 (Account Rollup, n8n/workflow-account-rollup.json) sub-process in parallel with responding to Lovable — does not block or delay the intake form's success response. Calls localhost directly (container-internal), never through the public tunnel, so it's unaffected by tunnel URL changes. onError: continueRegularOutput so a rollup failure never breaks the actual intake path.",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Intake Webhook": {
+      "main": [[{ "node": "Validate & Normalize Input", "type": "main", "index": 0 }]]
+    },
+    "Validate & Normalize Input": {
+      "main": [[{ "node": "Claude — Extract & Score", "type": "main", "index": 0 }]]
+    },
+    "Claude — Extract & Score": {
+      "main": [[{ "node": "Parse & Validate Claude Output", "type": "main", "index": 0 }]]
+    },
+    "Parse & Validate Claude Output": {
+      "main": [[{ "node": "Write to Google Sheets", "type": "main", "index": 0 }]]
+    },
+    "Write to Google Sheets": {
+      "main": [[
+        { "node": "Respond to Lovable", "type": "main", "index": 0 },
+        { "node": "Call Account Rollup", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

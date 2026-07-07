@@ -1,0 +1,180 @@
+{
+  "name": "Revenue-at-Risk — Workflow 5: Account Rollup",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "rollup-account",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-rollup-webhook",
+      "name": "Rollup Account Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 304],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Called by Workflow 1 (after a new signal) and Workflow 3 (after a ticket is created/updated), in parallel with their own response — not blocking either one. Body: { account_name }. Can also be called directly (e.g. via curl) to backfill/refresh a single account."
+    },
+    {
+      "id": "node-wait-consistency-2",
+      "name": "Wait For Sheet Consistency",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [110, 300],
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "notes": "Defensive buffer against Google Sheets read-after-write lag — this workflow is fire-and-forget (not blocking any user-facing response), so trading a little latency for reliability costs nothing. Note: the actual root cause of early rollup failures during development was a wrong sheet reference on Read RiskData (see that node's notes), not this timing issue — this wait is kept as legitimate defense-in-depth regardless, since Sheets API read-after-write consistency is a real, separate risk."
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "RiskData", "mode": "name" },
+        "options": {}
+      },
+      "id": "node-read-riskdata",
+      "name": "Read RiskData",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [224, 304],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "IMPORTANT: this must point at the RiskData tab, not AccountRollup. During development this was accidentally switched to AccountRollup once via the n8n editor UI's sheet dropdown, which silently made every rollup read 0 rows (the wrong, empty sheet) — not a race condition, a wrong reference. Verify the sheetName field if this workflow ever stops finding accounts."
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $('Rollup Account Webhook').first().json.body || $('Rollup Account Webhook').first().json;\nconst targetName = (webhookData.account_name || '').toString().trim().toLowerCase();\nif (!targetName) {\n  throw new Error('Missing required field: account_name');\n}\n\nconst rows = $input.all().map(i => i.json).filter(r => {\n  const n = (r.account_name || r['account_name '] || '').toString().trim().toLowerCase();\n  return n === targetName;\n});\nif (rows.length === 0) {\n  throw new Error(`No RiskData row found for account_name \"${webhookData.account_name}\"`);\n}\n\nfunction slugify(s) {\n  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');\n}\n\nconst accountName = (rows[0].account_name || rows[0]['account_name ']).toString().trim();\nconst accountId = slugify(accountName);\n\nconst sorted = [...rows].sort((a, b) => new Date(b.last_updated || 0) - new Date(a.last_updated || 0));\nconst mostRecent = sorted[0];\n\nlet representative = rows[0];\nfor (const r of rows) {\n  const score = parseFloat(r.financial_risk_score) || 0;\n  if (score > (parseFloat(representative.financial_risk_score) || 0)) representative = r;\n}\n\nconst arr = parseFloat(mostRecent.arr) || 0;\n\nfunction contractTier(a) {\n  if (a >= 500000) return 'Strategic';\n  if (a >= 200000) return 'Enterprise';\n  if (a >= 50000) return 'Growth';\n  return 'Starter';\n}\n\nconst renewalDays = parseInt(mostRecent.renewal_horizon_days, 10);\nconst renewalDate = !isNaN(renewalDays)\n  ? new Date(Date.now() + renewalDays * 86400000).toISOString().slice(0, 10)\n  : null;\n\nconst sentimentRank = { critical: 4, frustrated: 3, concerned: 2, neutral: 1, satisfied: 0 };\nlet worstSentiment = 'neutral';\nlet worstRank = -1;\nfor (const r of rows) {\n  const s = (r.sentiment || '').toLowerCase();\n  const rank = sentimentRank[s] ?? -1;\n  if (rank > worstRank) { worstRank = rank; worstSentiment = s || 'neutral'; }\n}\n\nconst escalationCount = rows.filter(r => String(r.escalation_flag).toLowerCase() === 'true').length;\n\nconst churnRiskScore = Math.min(1, (parseFloat(representative.financial_risk_score) || 0) / 100);\nlet churnRiskTier = 'low';\nif (churnRiskScore > 0.8) churnRiskTier = 'critical';\nelse if (churnRiskScore > 0.6) churnRiskTier = 'high';\nelse if (churnRiskScore > 0.4) churnRiskTier = 'medium';\n\nconst revenueAtRisk = Math.round(arr * churnRiskScore);\n\nlet jiraTicketKey = null;\nfor (const r of rows) {\n  if (r.jira_ticket_key) { jiraTicketKey = r.jira_ticket_key; break; }\n}\n\nconst issues = rows.map((r, i) => ({\n  issue_id: `issue-${accountId}-${i + 1}`,\n  description: r.bug_summary || '',\n  severity: r.bug_severity || null,\n  days_open: parseInt(r.days_issue_open, 10) || null,\n  source: r.source_channel || 'manual_form',\n  source_ref: null,\n  jira_ticket: r.jira_ticket_key || null,\n  first_reported: r.last_updated || null,\n  last_updated: r.last_updated || null\n}));\n\nreturn [{\n  json: {\n    account_id: accountId,\n    account_name: accountName,\n    arr,\n    contract_tier: contractTier(arr),\n    renewal_date: renewalDate,\n    days_to_renewal: !isNaN(renewalDays) ? renewalDays : null,\n    cs_owner: mostRecent.cs_owner || null,\n    issues_json: JSON.stringify(issues),\n    escalation_count: escalationCount,\n    sentiment: worstSentiment,\n    churn_risk_score: Math.round(churnRiskScore * 100) / 100,\n    churn_risk_tier: churnRiskTier,\n    revenue_at_risk: revenueAtRisk,\n    recommended_action: representative.recommended_action || '',\n    jira_ticket_key: jiraTicketKey,\n    primary_technical_domain: representative.technical_domain || '',\n    top_issue_summary: representative.bug_summary || ''\n  }\n}];"
+      },
+      "id": "node-aggregate",
+      "name": "Aggregate Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [448, 304],
+      "notes": "Deterministic aggregation into schema/account-risk.json shape for the one account named in the webhook body. Representative-row rule (highest financial_risk_score) matches Workflow 3's Collapse & Filter Accounts — one consistent definition of 'this account's current risk' across the whole system, not two different ones. primary_technical_domain/top_issue_summary are simplifications: the domain/summary of the account's single highest-risk complaint, not a true breakdown across all its issues — documented as a known simplification in README."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "anthropic-version", "value": "2023-06-01" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"claude-sonnet-4-6\", max_tokens: 300, temperature: 0.3, system: \"You write concise 2-sentence executive summaries of enterprise account churn risk for a CS/Engineering leadership dashboard. Be specific: name the core issue, the dollar stakes, and the timeframe. No fluff, no generic advice.\", tools: [{ name: \"generate_executive_summary\", description: \"Produce the 2-sentence executive summary for this account.\", input_schema: { type: \"object\", properties: { executive_summary: { type: \"string\", maxLength: 400 } }, required: [\"executive_summary\"] } }], tool_choice: { type: \"tool\", name: \"generate_executive_summary\" }, messages: [{ role: \"user\", content: \"Account: \" + $json.account_name + \"\\nARR: $\" + $json.arr + \"\\nContract tier: \" + $json.contract_tier + \"\\nChurn risk: \" + $json.churn_risk_tier + \" (\" + $json.churn_risk_score + \")\\nRevenue at risk: $\" + $json.revenue_at_risk + \"\\nDays to renewal: \" + $json.days_to_renewal + \"\\nEscalation count: \" + $json.escalation_count + \"\\nOpen issues:\\n\" + $json.issues_json }] }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "node-claude-summary",
+      "name": "Claude — Executive Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [672, 304],
+      "credentials": {
+        "anthropicApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Anthropic account" }
+      },
+      "notes": "The one field in schema/account-risk.json that's genuinely meant to be LLM-synthesized, not computed — everything else in Aggregate Account is deterministic. jsonBody is built with JSON.stringify(), not hand-written template string interpolation — issues_json (itself a JSON string, full of quotes) breaks a hand-written JSON template if embedded directly via {{ }}; this was a real bug caught and fixed here, and in Workflow 1's Claude call which had the same latent vulnerability with raw_feedback."
+    },
+    {
+      "parameters": {
+        "jsCode": "const agg = $('Aggregate Account').first().json;\nconst claudeResponse = $input.first().json;\nconst toolUse = (claudeResponse.content || []).find(b => b.type === 'tool_use');\nconst executiveSummary = toolUse?.input?.executive_summary || '';\n\nreturn [{\n  json: {\n    ...agg,\n    executive_summary: executiveSummary,\n    last_synced: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-merge-summary",
+      "name": "Merge Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 304],
+      "notes": "Combines the deterministic aggregation (Aggregate Account) with the one LLM-generated field (executive_summary) into the final record shape written to AccountRollup."
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "AccountRollup", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_id": "={{ $json.account_id }}",
+            "account_name": "={{ $json.account_name }}",
+            "arr": "={{ $json.arr }}",
+            "contract_tier": "={{ $json.contract_tier }}",
+            "renewal_date": "={{ $json.renewal_date }}",
+            "days_to_renewal": "={{ $json.days_to_renewal }}",
+            "cs_owner": "={{ $json.cs_owner }}",
+            "issues_json": "={{ $json.issues_json }}",
+            "escalation_count": "={{ $json.escalation_count }}",
+            "sentiment": "={{ $json.sentiment }}",
+            "churn_risk_score": "={{ $json.churn_risk_score }}",
+            "churn_risk_tier": "={{ $json.churn_risk_tier }}",
+            "revenue_at_risk": "={{ $json.revenue_at_risk }}",
+            "recommended_action": "={{ $json.recommended_action }}",
+            "executive_summary": "={{ $json.executive_summary }}",
+            "jira_ticket_key": "={{ $json.jira_ticket_key }}",
+            "last_synced": "={{ $json.last_synced }}",
+            "primary_technical_domain": "={{ $json.primary_technical_domain }}",
+            "top_issue_summary": "={{ $json.top_issue_summary }}"
+          },
+          "matchingColumns": ["account_id"],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "node-write-rollup",
+      "name": "Write AccountRollup Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1104, 304],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Upserts (appendOrUpdate) matched on account_id — the first write for an account creates the row, every subsequent one updates it in place rather than appending a duplicate."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "node-respond-rollup",
+      "name": "Respond Rollup",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1328, 304],
+      "notes": "Returns the full aggregated record. Not consumed by Workflows 1/3 today (they call this webhook fire-and-forget, in parallel with their own response) — useful for direct manual testing/backfill via curl though, which is how several bugs in this workflow were actually caught."
+    }
+  ],
+  "connections": {
+    "Rollup Account Webhook": {
+      "main": [[{ "node": "Wait For Sheet Consistency", "type": "main", "index": 0 }]]
+    },
+    "Wait For Sheet Consistency": {
+      "main": [[{ "node": "Read RiskData", "type": "main", "index": 0 }]]
+    },
+    "Read RiskData": {
+      "main": [[{ "node": "Aggregate Account", "type": "main", "index": 0 }]]
+    },
+    "Aggregate Account": {
+      "main": [[{ "node": "Claude — Executive Summary", "type": "main", "index": 0 }]]
+    },
+    "Claude — Executive Summary": {
+      "main": [[{ "node": "Merge Summary", "type": "main", "index": 0 }]]
+    },
+    "Merge Summary": {
+      "main": [[{ "node": "Write AccountRollup Row", "type": "main", "index": 0 }]]
+    },
+    "Write AccountRollup Row": {
+      "main": [[{ "node": "Respond Rollup", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

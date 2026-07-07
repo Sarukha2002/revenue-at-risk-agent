@@ -1,0 +1,16 @@
+# Contains n8n API key — never commit
+.mcp.json
+.codex/config.toml
+
+# Local env/secrets
+.env
+.env.local
+
+# Local tool config / OS noise, not secrets but not meant to be shared
+.claude/settings.local.json
+.DS_Store
+
+# Kept local, not published in the public repo
+prompts/claude-prompts.md
+prompts/claude-system-prompt-v2.md
+docs/video-demo-script.md

@@ -1,0 +1,116 @@
+{
+  "name": "Revenue-at-Risk — Dashboard Data",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "dashboard-data",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "daeaceda-fa59-4d47-96ae-70488f1d9ac7",
+      "name": "Dashboard Data Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Node 1: Receives GET from Lovable dashboard (auto-refresh every 60s). Protected with the same Header Auth credential used on the intake webhook (Name: x-webhook-secret). Fans out to both reads below in parallel."
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "RiskData", "mode": "name" },
+        "options": {}
+      },
+      "id": "0b7c42d2-f05d-41ac-ad8d-d1553ba96384",
+      "name": "Read All Risk Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [224, 0],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Node 2: Reads every row from the RiskData sheet — one row per raw submitted signal. This becomes the .signals array in the response; Operational Detail's table reads it directly (unaggregated, on purpose)."
+    },
+    {
+      "id": "node-read-rollup",
+      "name": "Read AccountRollup",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [224, 150],
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "AccountRollup", "mode": "name" },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Reads the account-level aggregation Workflow 5 (n8n/workflow-account-rollup.json) maintains — one row per account, already deduplicated (see schema/account-risk.json). This is the .accounts array in the response; paired with Wait For Both Reads + Combine For Dashboard below so the response always has both accounts and signals together, never a partial one."
+    },
+    {
+      "id": "node-merge-sync",
+      "name": "Wait For Both Reads",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [340, 75],
+      "parameters": {
+        "mode": "chooseBranch",
+        "chooseBranchMode": "waitForAll",
+        "output": "specifiedInput",
+        "outputDataFrom": "input1"
+      },
+      "notes": "Pure synchronization barrier — Combine For Dashboard does its own $('Node Name').all() lookups on both source nodes, so the actual data output here doesn't matter. Fixes a real bug: wiring two nodes directly into one Code node's single input does NOT wait for both, it fires once per branch (whichever arrives first), causing 'hasn't been executed' errors on the other node — this Merge node in chooseBranch/waitForAll mode is the correct fan-in pattern."
+    },
+    {
+      "id": "node-combine-dashboard",
+      "name": "Combine For Dashboard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 0],
+      "parameters": {
+        "jsCode": "const accounts = $('Read AccountRollup').all().map(i => i.json);\nconst signals = $('Read All Risk Data').all().map(i => i.json);\n\nreturn [{ json: { accounts, signals } }];"
+      },
+      "notes": "Executive Summary reads .accounts (pre-aggregated by Workflow 5, one entry per account). Operational Detail's table reads .signals (raw RiskData, one row per submitted complaint) — unchanged granularity, that table is meant to show every individual issue."
+    },
+    {
+      "id": "node-respond-dashboard-4",
+      "name": "Respond Dashboard Data",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [680, 0],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "notes": "Returns { accounts: [...], signals: [...] } — accounts is the pre-aggregated per-account view from Workflow 5 (Executive Summary reads this), signals is the raw per-complaint RiskData rows (Operational Detail's table reads this). Two different granularities in one response on purpose — see lovable-prompt.md for which sub-tab uses which."
+    }
+  ],
+  "connections": {
+    "Dashboard Data Webhook": {
+      "main": [[
+        { "node": "Read All Risk Data", "type": "main", "index": 0 },
+        { "node": "Read AccountRollup", "type": "main", "index": 0 }
+      ]]
+    },
+    "Read All Risk Data": {
+      "main": [[{ "node": "Wait For Both Reads", "type": "main", "index": 0 }]]
+    },
+    "Read AccountRollup": {
+      "main": [[{ "node": "Wait For Both Reads", "type": "main", "index": 1 }]]
+    },
+    "Wait For Both Reads": {
+      "main": [[{ "node": "Combine For Dashboard", "type": "main", "index": 0 }]]
+    },
+    "Combine For Dashboard": {
+      "main": [[{ "node": "Respond Dashboard Data", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

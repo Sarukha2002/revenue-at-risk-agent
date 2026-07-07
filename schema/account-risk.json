@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AccountRisk",
+  "description": "Unified revenue-at-risk record per enterprise account",
+  "type": "object",
+  "required": ["account_id", "account_name", "arr", "churn_risk_score", "revenue_at_risk"],
+  "properties": {
+    "account_id": {
+      "type": "string",
+      "description": "Canonical account identifier (slug from CRM/Sheets)"
+    },
+    "account_name": {
+      "type": "string",
+      "description": "Display name of the enterprise client"
+    },
+    "arr": {
+      "type": "number",
+      "description": "Annual Recurring Revenue in USD"
+    },
+    "contract_tier": {
+      "type": "string",
+      "enum": ["Starter", "Growth", "Enterprise", "Strategic"],
+      "description": "Contract tier — drives escalation priority"
+    },
+    "renewal_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Contract renewal date in YYYY-MM-DD"
+    },
+    "days_to_renewal": {
+      "type": "integer",
+      "description": "Computed: days from today to renewal_date"
+    },
+    "cs_owner": {
+      "type": "string",
+      "description": "Customer Success Manager name"
+    },
+    "issues": {
+      "type": "array",
+      "description": "All open technical issues tied to this account",
+      "items": {
+        "type": "object",
+        "required": ["issue_id", "description", "severity", "days_open"],
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "description": "Auto-generated or linked Jira/Linear ID"
+          },
+          "description": {
+            "type": "string",
+            "description": "Claude-extracted plain-English description of the bug/issue"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"],
+            "description": "P0=critical/blocking, P1=major, P2=moderate, P3=minor"
+          },
+          "days_open": {
+            "type": "integer",
+            "description": "Number of days since this issue was first reported"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["slack", "google_sheets", "jira", "manual"],
+            "description": "Where this issue was originally captured"
+          },
+          "source_ref": {
+            "type": "string",
+            "description": "Slack message permalink or Sheet row reference"
+          },
+          "jira_ticket": {
+            "type": "string",
+            "description": "Jira/Linear ticket ID if created (e.g. ENG-4421)"
+          },
+          "first_reported": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "escalation_count": {
+      "type": "integer",
+      "description": "Number of times CS has escalated this account in the last 30 days"
+    },
+    "sentiment": {
+      "type": "string",
+      "enum": ["critical", "frustrated", "concerned", "neutral", "satisfied"],
+      "description": "Claude-assessed overall account sentiment from recent CS messages"
+    },
+    "churn_risk_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Claude-computed churn probability 0.0 (safe) to 1.0 (churning)"
+    },
+    "churn_risk_tier": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "description": "Bucketed from score: >0.8=critical, >0.6=high, >0.4=medium, else low"
+    },
+    "revenue_at_risk": {
+      "type": "number",
+      "description": "Computed: arr * churn_risk_score — dollar amount at risk of churn"
+    },
+    "recommended_action": {
+      "type": "string",
+      "description": "Claude-generated one-line recommended next action for CS or engineering"
+    },
+    "executive_summary": {
+      "type": "string",
+      "description": "Claude-generated 2-sentence summary for leadership dashboard"
+    },
+    "last_synced": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp of last n8n sync"
+    }
+  },
+
+  "examples": [
+    {
+      "account_id": "acme-corp",
+      "account_name": "Acme Corp",
+      "arr": 500000,
+      "contract_tier": "Strategic",
+      "renewal_date": "2026-09-15",
+      "days_to_renewal": 77,
+      "cs_owner": "Sarah Chen",
+      "issues": [
+        {
+          "issue_id": "issue-001",
+          "description": "SSO integration broken after v2.4 deploy — all users locked out",
+          "severity": "P0",
+          "days_open": 23,
+          "source": "slack",
+          "source_ref": "https://slack.com/archives/C123/p1234567",
+          "jira_ticket": "ENG-4421",
+          "first_reported": "2026-06-07T14:32:00Z",
+          "last_updated": "2026-06-29T09:15:00Z"
+        }
+      ],
+      "escalation_count": 4,
+      "sentiment": "critical",
+      "churn_risk_score": 0.91,
+      "churn_risk_tier": "critical",
+      "revenue_at_risk": 455000,
+      "recommended_action": "Escalate ENG-4421 to P0 immediately — SSO blocker has been open 23 days with renewal in 77 days",
+      "executive_summary": "Acme Corp ($500K ARR) is at critical churn risk due to a 23-day-old SSO outage. Engineering must resolve ENG-4421 this week or escalate to VP level.",
+      "last_synced": "2026-06-30T08:00:00Z"
+    }
+  ]
+}

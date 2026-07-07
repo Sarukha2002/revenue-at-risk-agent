@@ -1,0 +1,266 @@
+{
+  "name": "Revenue-at-Risk — Workflow 3: Ticket Enrichment",
+  "nodes": [
+    {
+      "id": "node-webhook-3",
+      "name": "Create Jira Ticket Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "create-jira-ticket",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Triggered by the Lovable dashboard's per-issue \"Create Jira Ticket\" button. Body: { account_name }. On-demand only, no schedule — a human decides which issue to escalate, per docs/pm-guidelines.md §10. Can also be called directly (e.g. via curl) to backfill/refresh a single account."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "RiskData",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-sheet",
+      "name": "Read RiskData",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [224, 304],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Reads the full RiskData sheet so Collapse & Filter Accounts can scope down to the one account named in the webhook body and collapse any duplicate rows for it. Same physical sheet as Workflow 1's write target and Workflow 4/5's reads."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scoped to the single account named in the webhook body — no schedule/loop, no score>60\n// gate: a human clicking \"Create Jira Ticket\" in the dashboard IS the escalation decision now.\nconst webhookData = $('Create Jira Ticket Webhook').first().json.body || $('Create Jira Ticket Webhook').first().json;\nconst targetName = (webhookData.account_name || '').toString().trim().toLowerCase();\nif (!targetName) {\n  throw new Error('Missing required field: account_name');\n}\n\nconst rows = $input.all().map(i => i.json).filter(r => {\n  const n = (r.account_name || r['account_name '] || '').toString().trim().toLowerCase();\n  return n === targetName;\n});\nif (rows.length === 0) {\n  throw new Error(`No RiskData row found for account_name \"${webhookData.account_name}\"`);\n}\n\nconst byAccount = {};\n\nfor (const row of rows) {\n  const name = (row.account_name || row['account_name '] || '').toString().trim();\n  if (!name) continue;\n  const score = parseFloat(row.financial_risk_score) || 0;\n  const existing = byAccount[name];\n  if (!existing || score > existing.financial_risk_score) {\n    byAccount[name] = { ...row, account_name: name, financial_risk_score: score };\n  }\n}\n\nfunction slugify(s) {\n  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');\n}\n\nconst qualifying = Object.values(byAccount)\n  .map(a => ({\n    account_name: a.account_name,\n    account_label: `acct-${slugify(a.account_name)}`,\n    severity_label: `sev-${(a.bug_severity || 'unknown').toLowerCase()}`,\n    arr: a.arr,\n    financial_risk_score: a.financial_risk_score,\n    revenue_at_risk: a.revenue_at_risk,\n    renewal_horizon_days: a.renewal_horizon_days,\n    technical_domain: a.technical_domain,\n    bug_summary: a.bug_summary,\n    recommended_action: a.recommended_action\n  }));\n\nreturn qualifying.map(a => ({ json: a }));"
+      },
+      "id": "node-collapse-filter",
+      "name": "Collapse & Filter Accounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [448, 304],
+      "notes": "Scoped to the single account_name given in the webhook body — no schedule, no batch loop, no score>60 gate. A human clicking \"Create Jira Ticket\" in the dashboard is the escalation decision now; this just collapses any duplicate rows for that account (max score wins) and precomputes deterministic account_label/severity_label the agent must use as-is."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'Account: ' + $json.account_name + '\\nAccount label (use exactly, do not alter): ' + $json.account_label + '\\nSeverity label (use exactly): ' + $json.severity_label + '\\nARR: $' + $json.arr + '\\nFinancial risk score: ' + $json.financial_risk_score + '/100\\nRevenue at risk: $' + $json.revenue_at_risk + '\\nRenewal horizon (days): ' + $json.renewal_horizon_days + '\\nTechnical domain: ' + $json.technical_domain + '\\nBug summary: ' + $json.bug_summary + '\\nRecommended action: ' + $json.recommended_action }}",
+        "options": {
+          "systemMessage": "You are the Ticket Enrichment agent for the Revenue-at-Risk system. For the ONE account described in the user message, ensure exactly one Jira ticket in project KAN correctly reflects its current risk. Follow these steps in order:\n\n1. ALWAYS call search_jira_ticket_by_label first, using the exact account_label given. Never skip this step and never guess whether a ticket exists.\n2. If no ticket is found: call create_jira_ticket with a clear summary (include the account name and technical domain), a full description covering the $ revenue at risk, renewal horizon, technical domain, bug summary, and recommended action, and both the account_label and severity_label given, exactly as provided.\n3. If a ticket already exists: check its status from the search result.\n   - If status is 'Done' (or otherwise closed/resolved), do NOT comment — the issue is resolved from a human standpoint. Just report that you're skipping it because it's already closed.\n   - Otherwise (status is 'To Do', 'In Progress', or anything not closed): call add_jira_comment with a STRICTLY INFORMATIONAL update — current $ revenue at risk, renewal horizon, and risk level, and nothing else. This comment must never suggest an action, never tell anyone what to do next, never reference or react to the ticket's current status/priority/assignee, and never imply agreement or disagreement with how a human is handling it. It is a data refresh, not a directive — a human already owns the next step once a ticket exists.\n4. NEVER attempt to resolve, close, delete, reopen, or change the status/priority of any ticket. No tool exists here for that on purpose — do not try to work around it via comments or any other means.\n5. NEVER create more than one ticket for the same account_label. If search_jira_ticket_by_label returns any match, you MUST NOT call create_jira_ticket.\n6. Once you've completed the single appropriate action (create, comment, or skip) for this account, respond with a one-sentence plain-text summary of what you did and why, and stop — do not call further tools.",
+          "maxIterations": 5,
+          "returnIntermediateSteps": true
+        }
+      },
+      "id": "node-agent",
+      "name": "Enrichment Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [912, 464],
+      "notes": "The reasoner. Native n8n AI Agent node (LangChain-based) instead of a hand-rolled tool-calling loop — see docs/loop-engineering-worksheet.md §5 for why. options.maxIterations=5 is the deterministic, code-enforced stopping condition (not a prompt instruction) if the agent doesn't naturally stop after its one action. tool_choice is 'auto' (not forced) since the agent must genuinely choose among 3 tools based on what search_jira_ticket returns — contrast with Workflow 1's forced single-tool extraction call."
+    },
+    {
+      "parameters": {
+        "model": { "__rl": true, "mode": "id", "value": "claude-sonnet-4-6" },
+        "options": { "temperature": 0.3 }
+      },
+      "id": "node-model",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.5,
+      "position": [832, 672],
+      "credentials": {
+        "anthropicApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Anthropic account" }
+      },
+      "notes": "Temperature 0.3, not 0 — this loop's generative work (ticket description, comment text) is drafting, not extraction, so a small amount of variability is correct here (contrast Workflow 1's temperature=0 extraction call, where any variability would be a bug). Requires n8n's native anthropicApi credential type, not the generic Header Auth used elsewhere — n8n never exposes stored secret values back out, so this must be created fresh per deployment."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 5,
+        "options": {
+          "jql": "={{ 'project = KAN AND labels = \"' + $fromAI('account_label', 'exact account label to search for, e.g. acct-acme-corp', 'string') + '\"' }}"
+        }
+      },
+      "id": "node-tool-search-2",
+      "name": "Search Jira Ticket",
+      "type": "n8n-nodes-base.jiraTool",
+      "typeVersion": 1,
+      "position": [1008, 672],
+      "credentials": {
+        "jiraSoftwareCloudApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Jira SW Cloud account" }
+      },
+      "notes": "Native n8n Jira Software Tool node (n8n-nodes-base.jiraTool), not the generic LangChain HTTP Request Tool — an earlier attempt with the generic tool crashed every invocation with a node registration error even after enabling N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE. Switching to this first-party Tool-variant node (same package as the Google Sheets node) fixed it immediately. Always called first by the agent's system prompt — this is the dedup check that prevents duplicate ticket creation."
+    },
+    {
+      "parameters": {
+        "project": {
+          "__rl": true,
+          "value": "REPLACE_WITH_YOUR_JIRA_PROJECT_ID",
+          "mode": "list",
+          "cachedResultName": "REPLACE_WITH_YOUR_PROJECT_NAME"
+        },
+        "issueType": {
+          "__rl": true,
+          "value": "REPLACE_WITH_YOUR_ISSUE_TYPE_ID",
+          "mode": "list",
+          "cachedResultName": "Task"
+        },
+        "summary": "={{ $fromAI('summary', 'short ticket summary including account name and technical domain', 'string') }}",
+        "additionalFields": {
+          "description": "={{ $fromAI('description', 'full ticket body: dollar revenue at risk, renewal horizon, technical domain, bug summary, recommended action', 'string') }}",
+          "labels": "={{ [$fromAI('account_label', 'exact account_label given for this account, never invent your own', 'string'), $fromAI('severity_label', 'exact severity_label given for this account', 'string')] }}"
+        }
+      },
+      "id": "node-tool-create-2",
+      "name": "Create Jira Ticket",
+      "type": "n8n-nodes-base.jiraTool",
+      "typeVersion": 1,
+      "position": [1008, 784],
+      "credentials": {
+        "jiraSoftwareCloudApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Jira SW Cloud account" }
+      },
+      "notes": "project/issueType resourceLocator IDs are specific to each Jira site/project — open this node once in the n8n editor UI after connecting your Jira credential and re-select Project/Issue Type from the dropdowns; n8n resolves the real internal IDs automatically, no manual lookup needed despite Jira's API technically requiring numeric IDs."
+    },
+    {
+      "parameters": {
+        "resource": "issueComment",
+        "issueKey": "={{ $fromAI('issue_key', 'the Jira issue key to comment on, e.g. KAN-12, from the search result', 'string') }}",
+        "comment": "={{ $fromAI('comment_text', 'fresh dollar impact / renewal-days / risk summary to post', 'string') }}",
+        "options": {},
+        "toolDescription": "Post a strictly informational $ impact / renewal-days / risk-level update on an existing Jira ticket. Do NOT call this if the ticket's status is 'Done' (or otherwise closed). The comment must contain data only — never an action suggestion, never a status opinion, never a directive to the assignee. Safe to call on tickets in 'To Do' or 'In Progress'."
+      },
+      "id": "node-tool-comment-2",
+      "name": "Add Jira Comment",
+      "type": "n8n-nodes-base.jiraTool",
+      "typeVersion": 1,
+      "position": [1008, 912],
+      "credentials": {
+        "jiraSoftwareCloudApi": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Jira SW Cloud account" }
+      },
+      "notes": "Content-restricted by the agent's system prompt, not by this tool's own config: comments must be strictly informational ($ impact / renewal / risk level), never an action suggestion or a reaction to the ticket's status — replaced an earlier design that silenced the bot entirely once a human touched the ticket, which meant progress updates on in-progress tickets went dark. See docs/loop-engineering-worksheet.md §5. Note there is deliberately no resolve/close tool in this workflow — see 'What is explicitly NOT in this loop' in the same doc."
+    },
+    {
+      "id": "node-extract-ticket",
+      "name": "Extract Ticket Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 460],
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst steps = item.intermediateSteps || [];\nconst accountName = $('Collapse & Filter Accounts').first().json.account_name;\n\nfunction tryParseJSON(x) {\n  if (typeof x !== 'string') return x;\n  try { return JSON.parse(x); } catch (e) { return null; }\n}\n\nlet ticketKey = null;\nlet actionTaken = 'unknown';\n\nfor (const step of steps) {\n  const toolName = ((step.action && (step.action.tool || step.action.toolName)) || '').toLowerCase();\n  const obs = tryParseJSON(step.observation);\n  if (!obs) continue;\n\n  if (toolName.includes('create')) {\n    const key = Array.isArray(obs) ? obs[0]?.key : obs.key;\n    if (key) { ticketKey = key; actionTaken = 'created'; }\n  } else if (toolName.includes('comment')) {\n    if (actionTaken === 'unknown') actionTaken = 'commented';\n  } else if (toolName.includes('search') && !ticketKey) {\n    const issues = Array.isArray(obs) ? obs : (obs.issues || []);\n    if (issues.length > 0 && issues[0].key) {\n      ticketKey = issues[0].key;\n      if (actionTaken === 'unknown') actionTaken = 'found_existing';\n    }\n  }\n}\n\nreturn [{\n  json: {\n    account_name: accountName,\n    jira_ticket_key: ticketKey,\n    action_taken: actionTaken,\n    summary: item.output || item.text || ''\n  }\n}];"
+      },
+      "notes": "Parses the Agent's returnIntermediateSteps output to pull the real Jira issue key out of whichever tool actually ran, rather than trusting the agent's free-text summary to contain it correctly."
+    },
+    {
+      "id": "node-update-sheet",
+      "name": "Update RiskData Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1470, 460],
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "value": "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "RiskData", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "account_name": "={{ $json.account_name }}",
+            "jira_ticket_key": "={{ $json.jira_ticket_key }}"
+          },
+          "matchingColumns": ["account_name"],
+          "schema": []
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Writes the Jira ticket key back to the RiskData row so the dashboard surfaces it automatically. Requires a jira_ticket_key column header on the RiskData sheet."
+    },
+    {
+      "id": "node-respond-webhook",
+      "name": "Respond to Dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1690, 460],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, account_name: $json.account_name, jira_ticket_key: $json.jira_ticket_key, action_taken: $json.action_taken, summary: $json.summary }) }}",
+        "options": {}
+      },
+      "notes": "Returns { success, account_name, jira_ticket_key, action_taken, summary } so the Lovable button's click handler can update that row's UI immediately without a full dashboard refetch."
+    },
+    {
+      "id": "node-call-rollup-w3",
+      "name": "Call Account Rollup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1470, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/rollup-account",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ account_name: $json.account_name }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID", "name": "Header Auth account 2" }
+      },
+      "notes": "Refreshes the account's rollup row (so the new jira_ticket_key shows up in the aggregated view) in parallel with responding to the dashboard — does not block the button's response. Calls localhost directly, container-internal, never through the public tunnel.",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Create Jira Ticket Webhook": {
+      "main": [[{ "node": "Read RiskData", "type": "main", "index": 0 }]]
+    },
+    "Read RiskData": {
+      "main": [[{ "node": "Collapse & Filter Accounts", "type": "main", "index": 0 }]]
+    },
+    "Collapse & Filter Accounts": {
+      "main": [[{ "node": "Enrichment Agent", "type": "main", "index": 0 }]]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [[{ "node": "Enrichment Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Search Jira Ticket": {
+      "ai_tool": [[{ "node": "Enrichment Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Create Jira Ticket": {
+      "ai_tool": [[{ "node": "Enrichment Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Add Jira Comment": {
+      "ai_tool": [[{ "node": "Enrichment Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Enrichment Agent": {
+      "main": [[{ "node": "Extract Ticket Key", "type": "main", "index": 0 }]]
+    },
+    "Extract Ticket Key": {
+      "main": [[{ "node": "Update RiskData Row", "type": "main", "index": 0 }]]
+    },
+    "Update RiskData Row": {
+      "main": [[
+        { "node": "Respond to Dashboard", "type": "main", "index": 0 },
+        { "node": "Call Account Rollup", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
